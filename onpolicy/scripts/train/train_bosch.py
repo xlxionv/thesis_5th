@@ -5,6 +5,8 @@ import multiprocessing as mp
 import platform
 import json
 import socket
+import shutil
+from datetime import datetime
 import numpy as np
 from pathlib import Path
 import torch
@@ -76,6 +78,21 @@ def _save_bosch_config(config_path, cfg):
             raise ValueError(
                 "Unsupported config format. Use .json or .yaml/.yml."
             )
+
+
+def _snapshot_bosch_config(config_path, run_dir):
+    if not config_path or not os.path.isfile(config_path):
+        return None
+    src = Path(config_path)
+    dst_dir = Path(run_dir)
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    if dst_dir.name.startswith("run"):
+        dst = dst_dir / src.name
+    else:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dst = dst_dir / f"{src.stem}_snapshot_{stamp}{src.suffix}"
+    shutil.copy2(src, dst)
+    return dst
 
 
 def _auto_fill_bosch_config(cfg, seed=1):
@@ -871,6 +888,10 @@ def main(args):
         run_dir = run_dir / curr_run
         if not run_dir.exists():
             os.makedirs(str(run_dir))
+
+    snap_path = _snapshot_bosch_config(all_args.bosch_config, run_dir)
+    if snap_path is not None:
+        print(f"[BOSCH config] Snapshot saved to: {snap_path}")
 
     if setproctitle is not None:
         setproctitle.setproctitle(

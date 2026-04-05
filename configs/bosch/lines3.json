@@ -8,6 +8,7 @@
   "lookahead_days": 5,
   "backlog_cost": 15.0,
   "holding_cost": 2.0,
+  "dense_production_reward": 100.0,
   "capacity_per_line": [
     23.83,
     23.83,

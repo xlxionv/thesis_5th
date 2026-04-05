@@ -177,7 +177,8 @@ class BoschEnv(object):
         #  ages (L),
         #  local_line_id_one_hot (L),
         #  line_contention (L) [manager only; machines see zeros],
-        #  product_urgency (P) [manager only; machines see zeros]]
+        #  product_urgency (P) [manager only; machines see zeros],
+        #  line_eligibility (L*P) [manager only; machines see zeros]]
         self.lookahead_days = int(getattr(args, "lookahead_days", 5))
         self.obs_dim = (
             2 * self.num_products
@@ -193,6 +194,7 @@ class BoschEnv(object):
             + self.num_lines
             + self.num_lines
             + self.num_products
+            + self.num_lines * self.num_products
         )
 
         high = np.full(self.obs_dim, np.inf, dtype=np.float32)
@@ -496,6 +498,9 @@ class BoschEnv(object):
         self.last_setup_cost_per_line = np.zeros(self.num_lines, dtype=np.float32)
         self.last_pm_cost = 0.0
         self.last_cm_cost = 0.0
+        self.last_product_service_costs = np.zeros(
+            self.num_products, dtype=np.float32
+        )
         self.last_utilization_total = 0.0
         self.last_utilization_per_line = np.zeros(self.num_lines, dtype=np.float32)
 
@@ -714,7 +719,12 @@ class BoschEnv(object):
                     self.dense_setup_penalty * float(setup_cost)
                 )
 
-            rewards[agent_id, 0] += self.dense_production_reward * float(qty)
+            cap = float(self.capacity_per_line[line_idx])
+            if cap > 0.0:
+                time_fraction = (qty * proc_time_per_unit) / cap
+                rewards[agent_id, 0] += (
+                    self.dense_production_reward * float(time_fraction) * cap
+                )
 
             # Always record the last produced product (needed for next changeover calc)
             self.line_setup[line_idx] = act_idx
@@ -801,8 +811,21 @@ class BoschEnv(object):
         return mask
 
     def _build_available_actions(self):
-        # Agent 0 uses MultiDiscrete and does not consume available_actions.
-        available_actions = [np.zeros(0, dtype=np.float32)]
+        # Agent 0 uses MultiDiscrete; build a per-dimension mask.
+        # Layout per line: [product (P), horizon (H+1)].
+        if self.num_lines > 0 and self.num_products > 0:
+            masks = []
+            for line_idx in range(self.num_lines):
+                prod_mask = self.line_eligibility[line_idx].astype(np.float32).copy()
+                if np.sum(prod_mask) <= 0.0:
+                    prod_mask[:] = 1.0
+                horizon_mask = np.ones(self.manager_max_horizon + 1, dtype=np.float32)
+                masks.append(prod_mask)
+                masks.append(horizon_mask)
+            manager_mask = np.concatenate(masks, axis=0)
+        else:
+            manager_mask = np.zeros(0, dtype=np.float32)
+        available_actions = [manager_mask]
         for line_idx in range(self.num_lines):
             available_actions.append(self._line_available_actions(line_idx))
         return available_actions
@@ -930,30 +953,9 @@ class BoschEnv(object):
         )
 
         # --- 3. MACHINE REWARD ---
-        total_responsibility = float(
-            np.sum(self.period_produced_per_line) + np.sum(self.queue)
-        )
-        for line_idx in range(self.num_lines):
-            line_responsibility = float(
-                np.sum(self.period_produced_per_line[line_idx])
-                + np.sum(self.queue[line_idx])
-            )
-            if total_responsibility > 0.0:
-                share = line_responsibility / total_responsibility
-            else:
-                share = 1.0 / float(self.num_lines)
-
-            line_service_cost = share * float(inv_cost + backlog_cost)
-            line_prod_cost = float(
-                np.sum(
-                    self.period_produced_per_line[line_idx]
-                    * self.production_cost_matrix[line_idx]
-                )
-            )
-
-            rewards[1 + line_idx, 0] = -self.alpha_cost_weight * (
-                line_service_cost + line_prod_cost
-            )
+        # Machine agents receive dense, local rewards during _machines_step().
+        # We avoid adding any end-of-period service penalties here.
+        rewards[1:, 0] = 0.0
 
         return rewards
 
@@ -962,8 +964,8 @@ class BoschEnv(object):
         t = min(self.period_index, self.num_periods - 1)
         period_demand = self.demand[t]
 
-        inv_cost = 0.0
-        backlog_cost = 0.0
+        inv_costs = np.zeros(self.num_products, dtype=np.float32)
+        backlog_costs = np.zeros(self.num_products, dtype=np.float32)
 
         for p in range(self.num_products):
             total_demand = period_demand[p] + self.backlog[p]
@@ -976,11 +978,14 @@ class BoschEnv(object):
                 self.inventory[p] = 0.0
                 self.backlog[p] = total_demand - total_supply
 
-            inv_cost += self.holding_cost * self.inventory[p]
-            backlog_cost += self.backlog_cost * self.backlog[p]
+            inv_costs[p] = self.holding_cost * self.inventory[p]
+            backlog_costs[p] = self.backlog_cost * self.backlog[p]
             if self.backlog[p] > 0:
-                backlog_cost += self.per_product_backlog_penalty
+                backlog_costs[p] += self.per_product_backlog_penalty
 
+        self.last_product_service_costs = inv_costs + backlog_costs
+        inv_cost = float(np.sum(inv_costs))
+        backlog_cost = float(np.sum(backlog_costs))
         return inv_cost, backlog_cost
 
     def _decode_agent0_action(self, action_vec):
@@ -1167,6 +1172,13 @@ class BoschEnv(object):
             if agent_id == 0:
                 vec[pos : pos + self.num_products] = urgency
             pos += self.num_products
+
+            # Line eligibility (manager only; machines get zeros)
+            if agent_id == 0:
+                vec[pos : pos + self.num_lines * self.num_products] = (
+                    self.line_eligibility.reshape(-1).astype(np.float32)
+                )
+            pos += self.num_lines * self.num_products
 
             obs_all.append(vec)
 

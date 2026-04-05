@@ -234,6 +234,28 @@ class MPERunner(Runner):
                             float(np.mean(per_line))
                         )
 
+                    # Always log per-product assignment / unmet demand (agent 0 only)
+                    if "period_assigned_lines_per_product" in agent0_info:
+                        assigned = np.asarray(
+                            agent0_info["period_assigned_lines_per_product"],
+                            dtype=np.float32,
+                        )
+                        unmet = np.asarray(
+                            agent0_info["period_unmet_demand_per_product"],
+                            dtype=np.float32,
+                        )
+                        codes = agent0_info.get("period_product_codes")
+                        if not isinstance(codes, list) or len(codes) != len(assigned):
+                            codes = [str(i) for i in range(len(assigned))]
+                        for i, code in enumerate(codes):
+                            safe_code = str(code).replace(" ", "_")
+                            env_infos.setdefault(
+                                f"assigned_lines_prod_{safe_code}", []
+                            ).append(float(assigned[i]))
+                            env_infos.setdefault(
+                                f"unmet_demand_prod_{safe_code}", []
+                            ).append(float(unmet[i]))
+
                     # Optional per-period debug report
                     if (
                         self.debug_daily_report
