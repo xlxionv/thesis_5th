@@ -815,7 +815,7 @@ def main(args):
     all_args.use_centralized_V = True
     # Manager should be trained only on manager decision steps via active_masks.
     all_args.use_policy_active_masks = True
-    all_args.use_value_active_masks = True
+    all_args.use_value_active_masks = False
 
     # Align episode_length (max timesteps) with micro-step horizon
     # 1 manager step + max_actions_per_period machine steps per period
